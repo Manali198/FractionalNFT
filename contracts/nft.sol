@@ -33,6 +33,16 @@ contract NFT is Ownable, ERC721URIStorage {
         _locked = false;
     }
 
+    modifier auctionEnded(uint256 tokenId) {
+    require(_tokenAuctions[tokenId].endTime != 0, "Auction does not exist");
+    require(
+        _tokenAuctions[tokenId].endTime <= block.timestamp,
+        "Auction has not ended"
+    );
+    _;
+}
+
+
     struct Auction {
         uint256 tokenId;
         address highestBidder;
@@ -137,29 +147,6 @@ contract NFT is Ownable, ERC721URIStorage {
             highestBid: 0,
             endTime: block.timestamp + duration
         });
-    }
-
-    // Function to place a bid on an ongoing auction
-    function placeBid(uint256 tokenId) external payable {
-        Auction storage auction = _tokenAuctions[tokenId];
-
-        // Check if the auction is ongoing
-        require(block.timestamp < auction.endTime, "Auction has ended");
-
-        // Check if the bid is higher than the current highest bid
-        require(
-            msg.value > auction.highestBid,
-            "Bid must be higher than current highest bid"
-        );
-
-        // Refund the previous highest bidder
-        if (auction.highestBidder != address(0)) {
-            payable(auction.highestBidder).transfer(auction.highestBid);
-        }
-
-        // Update the highest bidder and highest bid
-        auction.highestBidder = msg.sender;
-        auction.highestBid = msg.value;
     }
 
     // Function to end the auction and transfer the NFT to the highest bidder
