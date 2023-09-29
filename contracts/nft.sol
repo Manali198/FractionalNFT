@@ -5,8 +5,9 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 
-contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
+contract NFT is Ownable, ERC721URIStorage {
     using SafeMath for uint256;
 
     // Event emitted when revenue is distributed
@@ -32,11 +33,35 @@ contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
         _locked = false;
     }
 
+    struct Auction {
+        uint256 tokenId;
+        address highestBidder;
+        uint256 highestBid;
+        uint256 endTime;
+    }
+
     // Struct to store revenue distribution information
     struct RevenueDistribution {
         uint256 percentage; // Percentage of revenue to distribute
         address recipient; // Address to receive the distributed revenue
     }
+
+    event NFTMinted(
+        uint256 tokenId,
+        address to,
+        bool isFractional,
+        string tokenUrl,
+        string tokenName,
+        string tokenDescription
+    );
+
+    event AuctionEnded(
+        uint256 indexed tokenId,
+        address indexed highestBidder,
+        uint256 highestBid
+    );
+
+    mapping(uint256 => Auction) private _tokenAuctions;
 
     // Mapping to store ownership shares of each address for each token ID
     mapping(uint256 => mapping(address => uint256)) private _ownershipShares;
@@ -50,22 +75,140 @@ contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
     // Counter for the next available token ID
     uint256 private _nextTokenId = 1;
 
+    mapping(uint256 => uint256) private _royaltyFees;
+
+    // Mapping to store the sale price for each token ID
+    mapping(uint256 => uint256) private _salePrices;
+
+    // Mapping to store the edition size for each token ID
+    mapping(uint256 => uint256) private _editionSizes;
+
+    // Mapping to store the number of tokens minted for each edition
+    mapping(uint256 => uint256) private _mintedEditions;
+
+    //Mapping to store whether an NFT is fractional or not
+    mapping(uint256 => bool) private _isFractional;
+
+    // Function to set the sale price for an NFT
+    function setSalePrice(
+        uint256 tokenId,
+        uint256 salePrice
+    ) external onlyOwner {
+        _salePrices[tokenId] = salePrice;
+    }
+
     // Constructor to initialize the contract with a name and symbol
     constructor(
         string memory name,
         string memory symbol
     ) ERC721(name, symbol) {}
 
+    // Function to set the royalty fee for an NFT
+    function setRoyaltyFee(
+        uint256 tokenId,
+        uint256 percentage
+    ) external onlyOwner {
+        require(percentage <= 100, "Invalid royalty percentage");
+        _royaltyFees[tokenId] = percentage;
+    }
+
+    // Function to distribute royalty fees
+    function distributeRoyalty(uint256 tokenId, uint256 amount) internal {
+        uint256 royaltyPercentage = _royaltyFees[tokenId];
+        uint256 royalty = (amount * royaltyPercentage) / 100;
+        payable(ownerOf(tokenId)).transfer(royalty);
+    }
+
+    // Function to start an auction for a token
+    function startAuction(
+        uint256 tokenId,
+        uint256 duration
+    ) external onlyOwner {
+        require(_exists(tokenId), "Token does not exist");
+        require(
+            _tokenAuctions[tokenId].endTime == 0,
+            "Auction already started"
+        );
+
+        // Set the auction details
+        _tokenAuctions[tokenId] = Auction({
+            tokenId: tokenId,
+            highestBidder: address(0),
+            highestBid: 0,
+            endTime: block.timestamp + duration
+        });
+    }
+
+    // Function to place a bid on an ongoing auction
+    function placeBid(uint256 tokenId) external payable {
+        Auction storage auction = _tokenAuctions[tokenId];
+
+        // Check if the auction is ongoing
+        require(block.timestamp < auction.endTime, "Auction has ended");
+
+        // Check if the bid is higher than the current highest bid
+        require(
+            msg.value > auction.highestBid,
+            "Bid must be higher than current highest bid"
+        );
+
+        // Refund the previous highest bidder
+        if (auction.highestBidder != address(0)) {
+            payable(auction.highestBidder).transfer(auction.highestBid);
+        }
+
+        // Update the highest bidder and highest bid
+        auction.highestBidder = msg.sender;
+        auction.highestBid = msg.value;
+    }
+
+    // Function to end the auction and transfer the NFT to the highest bidder
+    function endAuction(uint256 tokenId) external auctionEnded(tokenId) {
+        Auction storage auction = _tokenAuctions[tokenId];
+
+        // Ensure the auction has not ended yet
+        require(auction.endTime > 0, "Auction does not exist");
+
+        // Ensure the highest bidder is not the zero address
+        require(auction.highestBidder != address(0), "No valid bids");
+
+        // Transfer the NFT to the highest bidder
+        _transfer(ownerOf(tokenId), auction.highestBidder, tokenId);
+
+        // Emit an event indicating the end of the auction
+        emit AuctionEnded(tokenId, auction.highestBidder, auction.highestBid);
+
+        // Delete the auction
+        delete _tokenAuctions[tokenId];
+    }
+
+    // Function for users to place bids
+    function placeBid(uint256 tokenId) external payable {
+        require(
+            _tokenAuctions[tokenId].endTime > block.timestamp,
+            "Auction ended"
+        );
+        require(msg.value > _tokenAuctions[tokenId].highestBid, "Bid too low");
+
+        if (_tokenAuctions[tokenId].highestBidder != address(0)) {
+            // Return funds to the previous highest bidder
+            payable(_tokenAuctions[tokenId].highestBidder).transfer(
+                _tokenAuctions[tokenId].highestBid
+            );
+        }
+
+        // Update highest bidder and bid amount
+        _tokenAuctions[tokenId].highestBidder = msg.sender;
+        _tokenAuctions[tokenId].highestBid = msg.value;
+    }
+
     function mint(
         address to,
-        uint256 shares,
-        string memory tokenUrl
+        string memory tokenUrl,
+        bool isFractional
     ) external onlyOwner {
         require(to != address(0), "Invalid address");
-        require(
-            _nextTokenId <= type(uint256).max - shares,
-            "Token ID overflow"
-        );
+        require(_nextTokenId <= type(uint256).max, "Token ID overflow");
 
         // Assign the next available token ID
         uint256 tokenId = _nextTokenId;
@@ -73,17 +216,50 @@ contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
         // Mint the NFT to the specified address
         _mint(to, tokenId);
 
-        // Update total supply and ownership shares
-        _ownershipShares[tokenId][to] = shares;
-
         // Add the owner to the list of share owners
         _shareOwners[tokenId].push(to);
 
         // Store the NFT URL
         _setTokenURI(tokenId, tokenUrl);
 
+        // Store whether the NFT is fractional or not
+        _isFractional[tokenId] = isFractional;
+
         // Increment the next available token ID for the next minting
         _nextTokenId = tokenId + 1;
+    }
+
+    // Function to check if an NFT is fractional or not
+    function isFractional(uint256 tokenId) external view returns (bool) {
+        require(_exists(tokenId), "Token does not exist");
+        return _isFractional[tokenId];
+    }
+
+    event DebugUint(uint256 value);
+    event DebugString(string value);
+
+    // Function to buy the NFT
+    function buyToken(uint256 tokenId) external payable nonReentrant {
+        require(_exists(tokenId), "Token does not exist");
+        require(_salePrices[tokenId] > 0, "Sale price not set");
+
+        uint256 salePrice = _salePrices[tokenId];
+
+        // Ensure that the sent amount is at least equal to the sale price
+        require(msg.value >= salePrice, "Insufficient funds");
+
+        emit DebugUint(msg.value);
+        emit DebugString(Strings.toString(salePrice));
+
+        // Transfer ownership to the buyer
+        _transfer(ownerOf(tokenId), msg.sender, tokenId);
+
+        // Distribute revenue (you may adjust this based on your revenue distribution logic)
+        uint256 royalty = (salePrice * 10) / 100; // Assuming 10% royalty
+        payable(owner()).transfer(royalty);
+        payable(ownerOf(tokenId)).transfer(msg.value - royalty);
+
+        emit DebugString("Transaction successful");
     }
 
     // Function for the contract owner to transfer ownership shares to another address
@@ -127,6 +303,7 @@ contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
         address indexed to,
         uint256 shares
     );
+
     event OwnershipSharesUpdated(
         uint256 indexed tokenId,
         address indexed owner,
@@ -179,7 +356,6 @@ contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
         for (uint256 i = 0; i < owners.length; i++) {
             totalShares += _ownershipShares[tokenId][owners[i]];
         }
-
         return totalShares;
     }
 
@@ -207,12 +383,11 @@ contract FractionalOwnershipNFT is Ownable, ERC721URIStorage {
     function addRevenueDistribution(
         uint256 tokenId,
         uint256 percentage,
-
-        //The recipient address in the addRevenueDistribution() function is the address 
-        // of the person or organization that will receive a percentage of the revenue 
-        //from the sale of the token with the given ID. This could be the creator of the 
+        //The recipient address in the addRevenueDistribution() function is the address
+        // of the person or organization that will receive a percentage of the revenue
+        //from the sale of the token with the given ID. This could be the creator of the
         //token, the owner of the token, or any other address that you specify.
-        
+
         address recipient
     ) external onlyOwner {
         require(percentage <= 100, "Invalid percentage");
